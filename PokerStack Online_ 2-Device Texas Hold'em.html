@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PokerStack: A Stack-Based Texas Hold’em Simulator</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:#0b3d2e;color:#f4efe0;font-family:Georgia,'Times New Roman',serif;padding:12px;max-width:900px;margin:auto}
+h1{font-size:22px;margin:4px 0}small,.sub{opacity:.75;font-size:13px}
+.panel{background:#0f5a42;border:1px solid #1d7a5a;border-radius:12px;padding:10px;margin:10px 0}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.c{width:46px;height:64px;background:#fff;color:#111;border-radius:6px;display:flex;align-items:center;justify-content:center;text-align:center;font-weight:bold;font-size:16px;line-height:1.1;box-shadow:0 1px 3px #0008}
+.c.r{color:#c0182b}.c.back{background:repeating-linear-gradient(45deg,#7a1f2b,#7a1f2b 5px,#a3303e 5px,#a3303e 10px);border:2px solid #fff}
+.c.empty{background:#0000;border:1px dashed #ffffff55;box-shadow:none}
+.pl{flex:1;min-width:230px}.pl.turn{outline:2px solid #ffd166}
+button{font:inherit;background:#ffd166;color:#222;border:0;border-radius:8px;padding:9px 14px;cursor:pointer}
+button:disabled{opacity:.4;cursor:not-allowed}button.alt{background:#e8e2cf}button.red{background:#ef6f6c}
+#msg{font-size:17px;min-height:24px;color:#ffd166}
+.log{max-height:150px;overflow:auto;font-size:14px;font-family:monospace;background:#0a2f23;border-radius:8px;padding:6px}
+.log div:first-child{color:#ffd166}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}@media(max-width:600px){.grid{grid-template-columns:1fr}}
+</style></head><body>
+<h1>♠ PokerStack ♥</h1>
+<div class="sub">Online Texas Hold’em for 2 players on 2 devices. Deck, burn pile and action log are <b>stacks (LIFO)</b>.</div>
+<div class="panel" id="lobby"><div class="row"><button id="create">Create room</button><span class="sub">or join:</span><input id="code" maxlength="4" placeholder="CODE" style="width:80px;font:inherit;padding:8px;text-transform:uppercase"><button class="alt" id="join">Join</button></div><div class="sub" id="lerr" style="margin-top:6px"></div></div>
+<div id="game" style="display:none"><div class="panel" id="roominfo"></div>
+
+<div class="panel"><div class="row"><div id="pl0" class="pl panel"></div><div id="pl1" class="pl panel"></div></div>
+<div><b>Community cards</b> <span class="sub" id="stage"></span></div>
+<div class="row" id="board" style="margin:6px 0"></div>
+<div>Pot: <b id="pot">0</b></div></div>
+
+<div id="msg"></div>
+<div class="row" id="btns" style="margin:8px 0"></div>
+
+<div class="grid">
+<div class="panel"><b>Deck stack</b> <span class="sub" id="dn"></span>
+<div class="row" style="margin-top:6px"><div id="dtop"></div><button class="alt" id="peek">Peek top card</button></div>
+<div class="sub" style="margin-top:6px">Deal = pop()<br>Peek = top without removing</div></div>
+<div class="panel"><b>Burn stack</b> <span class="sub" id="bn"></span>
+<div class="row" id="burn" style="margin-top:6px"></div>
+<div class="sub" style="margin-top:6px">Burn = push() (one before flop, turn, river)</div></div>
+</div>
+<div class="panel"><div class="row"><b>Action stack</b><button class="red" id="undo">Undo last action (pop)</button></div>
+<div class="log" id="log" style="margin-top:6px"></div></div>
+
+</div>
+<script>
+const SU=['♠','♥','♦','♣'],RL={11:'J',12:'Q',13:'K',14:'A'},HN=['High card','Pair','Two pair','Three of a kind','Straight','Flush','Full house','Four of a kind','Straight flush'];
+const rl=r=>RL[r]||r,$=id=>document.getElementById(id),clone=o=>JSON.parse(JSON.stringify(o));
+const cardH=(c,down)=>down?'<div class="c back"></div>':`<div class="c ${c.s==1||c.s==2?'r':''}">${rl(c.r)}<br>${SU[c.s]}</div>`;
+const empty='<div class="c empty"></div>';
+let db,user,ref,unsub,room=null,S,log=[],me=-1,myId=null,code='',peeking=false;
+
+function freshHand(chips,hand){
+  let d=[];for(let s=0;s<4;s++)for(let r=2;r<=14;r++)d.push({r,s});
+  for(let i=51;i>0;i--){const j=Math.floor(Math.random()*(i+1));[d[i],d[j]]=[d[j],d[i]];}
+  const N={deck:d,burn:[],board:[],h:[[],[]],bet:[0,0],tot:[10,10],acted:[false,false],stage:0,turn:hand%2,over:false,hand,chips:[chips[0]-10,chips[1]-10],msg:`Hand ${hand+1} started. Ante 10 each. Player ${hand%2+1} acts first.`};
+  for(let k=0;k<2;k++)for(let i=0;i<2;i++)N.h[i].push(N.deck.pop());
+  return N;
+}
+function save(){ref.set({players:room.players,S,log}).catch(e=>{$('lerr').textContent='Save failed: '+(e&&e.message||e)});}
+function snap(label){log.push({label,s:JSON.stringify(S)});}
+function undo(){if(!log.length)return;S=JSON.parse(log.pop().s);S.msg='Last action undone (popped from action stack).';save();}
+function next(){
+  S.stage++;S.bet=[0,0];S.acted=[false,false];S.turn=S.hand%2;
+  if(S.stage==4)return showdown();
+  S.burn.push(S.deck.pop());
+  const n=S.stage==1?3:1;for(let i=0;i<n;i++)S.board.push(S.deck.pop());
+  S.msg=['','Flop dealt (burned 1, popped 3).','Turn dealt (burned 1, popped 1).','River dealt (burned 1, popped 1).'][S.stage];
+  if(S.chips[0]==0||S.chips[1]==0)next();
+}
+function act(t){
+  if(S.over||S.turn!=me)return;
+  const i=me,o=1-i,lbl={fold:'folds',check:'checks',call:'calls',raise:'raises'}[t];
+  snap(`P${i+1} ${lbl} (${['Pre-flop','Flop','Turn','River'][S.stage]})`);
+  if(t=='fold'){S.over=true;S.chips[o]+=S.tot[0]+S.tot[1];S.msg=`Player ${i+1} folds. Player ${o+1} wins ${S.tot[0]+S.tot[1]}.`;S.stage=9;return save();}
+  if(t=='check')S.acted[i]=true;
+  if(t=='call'){const a=Math.min(S.bet[o]-S.bet[i],S.chips[i]);S.chips[i]-=a;S.bet[i]+=a;S.tot[i]+=a;S.acted[i]=true;}
+  if(t=='raise'){const to=Math.min(S.bet[o]+20,S.bet[i]+S.chips[i],S.bet[o]+S.chips[o]);const a=to-S.bet[i];S.chips[i]-=a;S.bet[i]=to;S.tot[i]+=a;S.acted[i]=true;S.acted[o]=false;}
+  S.msg=`Player ${i+1} ${lbl}.`;
+  if(S.acted[0]&&S.acted[1]&&S.bet[0]==S.bet[1])next();else S.turn=o;
+  save();
+}
+function showdown(){
+  const sc=[0,1].map(i=>best([...S.h[i],...S.board])),c=cmp(sc[0],sc[1]),pot=S.tot[0]+S.tot[1];
+  if(c==0){S.chips[0]+=S.tot[0];S.chips[1]+=S.tot[1];S.msg=`Showdown: tie, both have ${HN[sc[0][0]]}. Pot split.`;}
+  else{const w=c>0?0:1;S.chips[w]+=pot;S.msg=`Showdown: Player ${w+1} wins ${pot} with ${HN[sc[w][0]]} (Player ${2-w}: ${HN[sc[1-w][0]]}).`;}
+  S.over=true;S.stage=4;
+}
+function score5(c){
+  const r=c.map(x=>x.r).sort((a,b)=>b-a),fl=c.every(x=>x.s==c[0].s),m={};r.forEach(x=>m[x]=(m[x]||0)+1);
+  const g=Object.entries(m).map(([k,v])=>[v,+k]).sort((a,b)=>b[0]-a[0]||b[1]-a[1]),u=g.length==5;
+  let st=u&&r[0]-r[4]==4,hi=r[0];if(u&&r.join()=='14,5,4,3,2'){st=true;hi=5;}
+  const t=g.map(x=>x[1]),cn=g.map(x=>x[0]).join('');
+  if(st&&fl)return[8,hi];if(cn=='41')return[7,...t];if(cn=='32')return[6,...t];if(fl)return[5,...r];
+  if(st)return[4,hi];if(cn=='311')return[3,...t];if(cn=='221')return[2,...t];if(cn=='2111')return[1,...t];return[0,...r];
+}
+function cmp(a,b){for(let i=0;i<Math.max(a.length,b.length);i++){if((a[i]||0)!=(b[i]||0))return(a[i]||0)>(b[i]||0)?1:-1;}return 0;}
+function best(c){let b=null;for(let i=0;i<c.length;i++)for(let j=i+1;j<c.length;j++){const s=score5(c.filter((_,k)=>k!=i&&k!=j));if(!b||cmp(s,b)>0)b=s;}return b;}
+
+
+function render(){
+  if(!room)return;S=clone(room.S);log=clone(room.log||[]);
+  me=room.players.indexOf(myId);
+  const full=room.players[1]!=null,over=S.over;
+  $('lobby').style.display='none';$('game').style.display='block';
+  $('roominfo').innerHTML=`Room code: <b style="font-size:20px;letter-spacing:3px">${code}</b> <span class="sub">— ${me<0?'Spectating (room is full)':'You are <b>Player '+(me+1)+'</b>'}${full?'':' · waiting for Player 2 to join with this code'}</span>`;
+  for(let i=0;i<2;i++){
+    const vis=i==me||(over&&S.stage==4);
+    $('pl'+i).className='pl panel'+(S.turn==i&&!over?' turn':'');
+    $('pl'+i).innerHTML=`<b>Player ${i+1}${i==me?' (you)':''}</b> <span class="sub">chips: ${S.chips[i]}</span><div class="row" style="margin:6px 0">${S.h[i].map(c=>cardH(c,!vis)).join('')}</div><span class="sub">Bet this round: ${S.bet[i]}</span>`;
+  }
+  $('board').innerHTML=[0,1,2,3,4].map(i=>S.board[i]?cardH(S.board[i]):empty).join('');
+  $('stage').textContent='— '+(S.stage<4?['Pre-flop','Flop','Turn','River'][S.stage]:S.stage==4?'Showdown':'Hand over');
+  $('pot').textContent=S.tot[0]+S.tot[1];
+  $('msg').textContent=S.msg+(!over&&full&&me>=0?(S.turn==me?' — Your turn!':` — Waiting for Player ${S.turn+1}…`):'');
+  $('dn').textContent=`(${S.deck.length} cards)`;$('bn').textContent=`(${S.burn.length} cards)`;
+  $('dtop').innerHTML=peeking&&S.deck.length?cardH(S.deck[S.deck.length-1]):'<div class="c back"></div>';
+  $('burn').innerHTML=S.burn.length?S.burn.map(()=>'<div class="c back"></div>').join(''):empty;
+  $('undo').disabled=!log.length||me<0||!full;
+  $('log').innerHTML=log.length?[...log].reverse().map((l,i)=>`<div>${log.length-i}. ${l.label}${i==0?'  ← top':''}</div>`).join(''):'<div class="sub">(empty stack)</div>';
+  const b=$('btns');b.innerHTML='';if(me<0||!full)return;
+  if(over){
+    const dead=S.chips.some(x=>x<=0),nb=document.createElement('button');nb.textContent=dead?'New game (reset chips)':'Next hand';
+    nb.onclick=()=>{S=freshHand(dead?[1000,1000]:S.chips,dead?0:S.hand+1);log=[];save();};b.appendChild(nb);return;
+  }
+  const i=me,o=1-i,mine=S.turn==me,need=S.bet[o]-S.bet[i],mk=(t,f,dis)=>{const x=document.createElement('button');x.textContent=t;x.disabled=!mine||!!dis;x.onclick=f;b.appendChild(x);return x;};
+  mk('Check',()=>act('check'),need>0);
+  mk(`Call ${Math.min(need,S.chips[i])}`,()=>act('call'),need<=0);
+  mk('Raise +20',()=>act('raise'),Math.min(S.bet[o]+20,S.bet[i]+S.chips[i],S.bet[o]+S.chips[o])<=S.bet[o]);
+  mk('Fold',()=>act('fold')).className='red';
+}
+function listen(c){
+  code=c;try{localStorage.setItem('pokerstack_room',c);}catch(e){}
+  ref=db.doc('rooms/'+c);if(unsub)unsub();
+  unsub=ref.onSnapshot(sn=>{if(sn.exists){room=clone(sn.data());render();}},e=>{$('lerr').textContent='Connection error: '+(e&&e.message||e);});
+}
+async function create(){
+  const c=Array.from({length:4},()=>'ABCDEFGHJKLMNPQRSTUVWXYZ'[Math.floor(Math.random()*24)]).join('');
+  const st=freshHand([1000,1000],0);room={players:[myId,null],S:st,log:[]};
+  try{await db.doc('rooms/'+c).set(room);listen(c);}catch(e){$('lerr').textContent='Could not create room (you may need Contributor access): '+(e&&e.message||e);}
+}
+async function join(c){
+  c=c.toUpperCase().trim();if(c.length!=4){$('lerr').textContent='Enter the 4-letter code.';return;}
+  try{
+    const sn=await db.doc('rooms/'+c).get();
+    if(!sn.exists){$('lerr').textContent='Room not found.';return;}
+    const d=clone(sn.data());
+    if(!d.players.includes(myId)&&d.players[1]==null){d.players[1]=myId;await db.doc('rooms/'+c).set(d);}
+    listen(c);
+  }catch(e){$('lerr').textContent='Could not join: '+(e&&e.message||e);}
+}
+$('peek').onclick=()=>{peeking=!peeking;render();};
+$('undo').onclick=undo;
+$('create').onclick=create;$('join').onclick=()=>join($('code').value);
+(async()=>{
+  $('create').disabled=$('join').disabled=true;
+  db=await claude.use('db');user=await claude.use('user');
+  if(!db||!user){$('lerr').textContent='Online play needs you to open this page signed in to Claude. Ask the host to share the link with you as a Contributor.';return;}
+  myId=await user.id();$('create').disabled=$('join').disabled=false;
+  try{const c=localStorage.getItem('pokerstack_room');if(c)join(c);}catch(e){}
+})();
+</script></body></html>
